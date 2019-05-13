@@ -3,6 +3,10 @@
 // https://github.com/feedhenry/fh-pipeline-library
 @Library('fh-pipeline-library') _
 
+stage('Trust') {
+    enforceTrustedApproval('aerogear')
+}
+
 def operatorName = "gitea-operator"
 def openshiftProjectName = "test-${operatorName}-${currentBuild.number}-${currentBuild.startTimeInMillis}"
 def operatorDockerImageName = "docker-registry.default.svc:5000/${openshiftProjectName}/${operatorName}-test:latest"
@@ -32,78 +36,77 @@ node ('operator-sdk') {
     stage ('Checkout') {
         checkout scm
     }
-    dir("memcached-operator"){
-        stage('Vendor the dependencies') {
-            sh 'dep ensure'
+    stage('Vendor the dependencies') {
+        sh 'dep ensure'
+    }
+
+    openshift.withCluster('operators-test-cluster') {
+        generateKubeConfig()
+
+        stage('New project in OpenShift') {
+            openshift.newProject(openshiftProjectName)
         }
-        
-        openshift.withCluster('operators-test-cluster') {
-            generateKubeConfig()
 
-            stage('New project in OpenShift') {
-                openshift.newProject(openshiftProjectName)
+        openshift.withProject(openshiftProjectName) {
+            stage("Build ${operatorName} & ${operatorName}-test binaries") {
+                sh """
+                ls
+                export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+                go build -o ${operatorName} cmd/manager/main.go
+                go test -c -o ${operatorName}-test ./test/e2e/...
+                """
             }
-            
-            openshift.withProject(openshiftProjectName) {
-                stage("Build ${operatorName} & ${operatorName}-test binaries") {
-                    sh """
-                    export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
-                    go build -o ${operatorName} cmd/manager/main.go
-                    go test -c -o ${operatorName}-test ./test/e2e/...
-                    """
-                }
-                
-                stage("Create test file ${testFileName}") {
-                    writeFile file: testFileName, text: testFileContent
-                    sh "chmod +x ${testFileName}"
-                    sh "cat ${testFileName}"
-                }
-                
-                stage("Create a Dockerfile for ${operatorName}-test") {
-                    writeFile file: "Dockerfile", text: "${dockerfileContent}"
-                    sh "cat Dockerfile"
-                }
-                
-                stage("Modify operator image name in operator deployment file") {
-                    sh "yq w -i deploy/operator.yaml spec.template.spec.containers[0].image ${operatorDockerImageName}"
-                }
-                
-                stage("Create necessary resources") {
-                    sh """
-                    kubectl apply -f deploy/crds/crd.yaml -n ${openshiftProjectName} || true
-                    kubectl create -f deploy/service_account.yaml -n ${openshiftProjectName}
-                    kubectl create -f deploy/role.yaml -n ${openshiftProjectName}
-                    kubectl create -f deploy/role_binding.yaml -n ${openshiftProjectName}
-                    """
-                }
-                
-                stage("Start OpenShift Build of operator image") {
-                    def nb = openshift.newBuild("--name=${operatorName}-test", "--binary")
-                    openshift.startBuild("${operatorName}-test", "--from-dir=.")
-                    def buildSelector = nb.narrow("bc").related("builds")
 
-                    try {
-                        timeout(5) {
-                            buildSelector.untilEach(1) {
-                                def buildPhase = it.object().status.phase
-                                println("Build phase:" + buildPhase)
-                                return (it.object().status.phase == "Complete")
-                            }
+            stage("Create test file ${testFileName}") {
+                writeFile file: testFileName, text: testFileContent
+                sh "chmod +x ${testFileName}"
+                sh "cat ${testFileName}"
+            }
+
+            stage("Create a Dockerfile for ${operatorName}-test") {
+                writeFile file: "Dockerfile", text: "${dockerfileContent}"
+                sh "cat Dockerfile"
+            }
+
+            stage("Modify operator image name in operator deployment file") {
+                sh "yq w -i deploy/operator.yaml spec.template.spec.containers[0].image ${operatorDockerImageName}"
+            }
+
+            stage("Create necessary resources") {
+                sh """
+                kubectl apply -f deploy/crds/crd.yaml -n ${openshiftProjectName} || true
+                kubectl create -f deploy/service_account.yaml -n ${openshiftProjectName}
+                kubectl create -f deploy/role.yaml -n ${openshiftProjectName}
+                kubectl create -f deploy/role_binding.yaml -n ${openshiftProjectName}
+                """
+            }
+
+            stage("Start OpenShift Build of operator image") {
+                def nb = openshift.newBuild("--name=${operatorName}-test", "--binary")
+                openshift.startBuild("${operatorName}-test", "--from-dir=.")
+                def buildSelector = nb.narrow("bc").related("builds")
+
+                try {
+                    timeout(5) {
+                        buildSelector.untilEach(1) {
+                            def buildPhase = it.object().status.phase
+                            println("Build phase:" + buildPhase)
+                            return (it.object().status.phase == "Complete")
                         }
-                    } catch (Exception e) {
-                        buildSelector.logs()
-                        error "Build timed out"
                     }
-                }
-                
-                stage('Test operator') {
-                    sh "operator-sdk test cluster ${operatorDockerImageName} --namespace ${openshiftProjectName} --service-account ${operatorName}"
+                } catch (Exception e) {
+                    buildSelector.logs()
+                    error "Build timed out"
                 }
             }
-            
-            stage('Delete OpenShift project') {
-                openshift.delete("project", openshiftProjectName)
+
+            stage('Test operator') {
+                sh "operator-sdk test cluster ${operatorDockerImageName} --namespace ${openshiftProjectName} --service-account ${operatorName}"
             }
+        }
+
+        stage('Delete OpenShift project') {
+            openshift.delete("project", openshiftProjectName)
         }
     }
 }
