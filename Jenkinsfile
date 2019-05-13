@@ -10,7 +10,6 @@ stage('Trust') {
 def operatorName = "gitea-operator"
 def openshiftProjectName = "test-${operatorName}-${currentBuild.number}-${currentBuild.startTimeInMillis}"
 def operatorDockerImageName = "docker-registry.default.svc:5000/${openshiftProjectName}/${operatorName}-test:latest"
-def goBuildFlags = "GOOS=linux GOARCH=amd64 CGO_ENABLED=0"
 def testFileName = 'go-test.sh'
 def testFileContent = """#!/bin/sh
 
@@ -50,7 +49,6 @@ node ('operator-sdk') {
         openshift.withProject(openshiftProjectName) {
             stage("Build ${operatorName} & ${operatorName}-test binaries") {
                 sh """
-                ls
                 export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
                 go build -o ${operatorName} cmd/manager/main.go
                 go test -c -o ${operatorName}-test ./test/e2e/...
@@ -60,12 +58,10 @@ node ('operator-sdk') {
             stage("Create test file ${testFileName}") {
                 writeFile file: testFileName, text: testFileContent
                 sh "chmod +x ${testFileName}"
-                sh "cat ${testFileName}"
             }
 
             stage("Create a Dockerfile for ${operatorName}-test") {
                 writeFile file: "Dockerfile", text: "${dockerfileContent}"
-                sh "cat Dockerfile"
             }
 
             stage("Modify operator image name in operator deployment file") {
@@ -87,7 +83,7 @@ node ('operator-sdk') {
                 def buildSelector = nb.narrow("bc").related("builds")
 
                 try {
-                    timeout(5) {
+                    timeout(1) {
                         buildSelector.untilEach(1) {
                             def buildPhase = it.object().status.phase
                             println("Build phase:" + buildPhase)
@@ -96,12 +92,18 @@ node ('operator-sdk') {
                     }
                 } catch (Exception e) {
                     buildSelector.logs()
+                    openshift.delete("project", openshiftProjectName)
                     error "Build timed out"
                 }
             }
 
             stage('Test operator') {
-                sh "operator-sdk test cluster ${operatorDockerImageName} --namespace ${openshiftProjectName} --service-account ${operatorName}"
+                try {
+                    sh "operator-sdk test cluster ${operatorDockerImageName} --namespace ${openshiftProjectName} --service-account ${operatorName}d"
+                } catch (Exception e) {
+                    openshift.delete("project", openshiftProjectName)
+                    error "Test of ${operatorName} has failed."
+                }
             }
         }
 
