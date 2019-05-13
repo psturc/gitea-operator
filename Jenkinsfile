@@ -99,7 +99,7 @@ node ('operator-sdk') {
 
             stage('Test operator') {
                 try {
-                    sh "operator-sdk test cluster ${operatorDockerImageName} --namespace ${openshiftProjectName} --service-account ${operatorName}d"
+                    sh "operator-sdk test cluster ${operatorDockerImageName} --namespace ${openshiftProjectName} --service-account ${operatorName}"
                 } catch (Exception e) {
                     openshift.delete("project", openshiftProjectName)
                     error "Test of ${operatorName} has failed."
